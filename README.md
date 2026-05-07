@@ -131,7 +131,7 @@ and returns:
   "query": "optional rewritten query",
   "constraints": {
     "max_sub_questions": 3,
-    "max_cost_usd": 0.5,
+    "max_cost_usd": 0.1,
     "max_tokens": 8000
   }
 }
