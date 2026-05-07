@@ -65,7 +65,7 @@ Current defaults from the active configuration are:
 |---|---:|---|
 | Max tokens per session | 8,000 | Caps the rolling session context and prevents uncontrolled prompt growth |
 | Compression threshold | 6,000 | Starts compression before the hard limit is reached |
-| Max cost per session | $0.50 | Allows substantially deeper research while still bounding spend |
+| Max cost per session | $0.10 | Allows substantially deeper research while still bounding spend |
 | Max sub-questions | 3 | Limits decomposition breadth to reduce latency and cost |
 | Max tool rounds per sub-question | 8 | Prevents open-ended tool loops |
 
