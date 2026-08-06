@@ -19,6 +19,8 @@ class MemoryManager:
         constraint_tracker: ConstraintTracker,
         compression_threshold: int,
         external_memory: WebhookMemoryBridge | None = None,
+        memory_top_k: int = 3,
+        context_chunks: list[str] | None = None,
     ) -> None:
         self.session_id = session_id
         self.vector_store = vector_store
@@ -26,7 +28,8 @@ class MemoryManager:
         self.constraint_tracker = constraint_tracker
         self.compression_threshold = compression_threshold
         self.external_memory = external_memory
-        self.context_chunks: list[str] = []
+        self.memory_top_k = memory_top_k
+        self.context_chunks: list[str] = list(context_chunks or [])
 
     async def _compress_oldest_n(self, n_to_compress: int) -> dict[str, Any]:
         n_to_compress = max(1, min(n_to_compress, len(self.context_chunks)))
@@ -45,7 +48,7 @@ class MemoryManager:
             )
         )
         self.constraint_tracker.estimate_and_add_cost(
-            "gpt-4o-mini",
+            self.summarizer.model,
             input_tokens,
             output_tokens,
         )
@@ -106,7 +109,7 @@ class MemoryManager:
         return await self._compress_oldest_n(min(2, len(self.context_chunks)))
 
     async def retrieve_relevant(self, query: str) -> list[dict[str, Any]]:
-        local = await self.vector_store.query(query, n_results=3)
+        local = await self.vector_store.query(query, n_results=self.memory_top_k)
         if not self.external_memory or not self.external_memory.is_configured():
             return local
         external = await self.external_memory.retrieve_similar(query)

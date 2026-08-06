@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from openai import AsyncOpenAI
 
@@ -13,6 +13,8 @@ from agent.tools.search import WebSearchTool
 
 if TYPE_CHECKING:
     from agent.integrations.webhook_memory import WebhookMemoryBridge
+
+TurnMode = Literal["deep", "light", "synthesize_only"]
 
 
 class ResearchOrchestrator:
@@ -27,6 +29,9 @@ class ResearchOrchestrator:
         external_memory: WebhookMemoryBridge | None = None,
         skip_web_search: bool = False,
         max_tool_rounds: int = 8,
+        research_model: str = "gpt-4o",
+        search_max_results: int = 3,
+        max_sub_questions: int = 3,
     ) -> None:
         self.openai_client = openai_client
         self.search_tool = search_tool
@@ -36,74 +41,111 @@ class ResearchOrchestrator:
         self.external_memory = external_memory
         self.skip_web_search = skip_web_search
         self.max_tool_rounds = max_tool_rounds
+        self.research_model = research_model
+        self.search_max_results = search_max_results
+        self.max_sub_questions = max_sub_questions
         self.decomposer = decomposer or QueryDecomposer(
             openai_client=openai_client,
-            max_sub_questions=getattr(constraint_tracker, "max_sub_questions", 4),
+            max_sub_questions=max_sub_questions,
+            model=research_model,
         )
+        self.last_answer = ""
 
-    async def run(self, query: str) -> AsyncGenerator[dict[str, Any], None]:
-        yield {"type": "thinking", "content": "Breaking down your research question..."}
+    async def run(
+        self,
+        query: str,
+        *,
+        turn_mode: TurnMode = "deep",
+        chat_history: list[dict[str, str]] | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        history = chat_history or []
 
-        sub_questions = await self.decomposer.decompose(query)
-        yield {
-            "type": "decompose",
-            "content": f"Identified {len(sub_questions)} sub-questions",
-            "data": {"sub_questions": sub_questions},
-        }
-        self.constraint_tracker.estimate_and_add_cost(
-            "gpt-4o",
-            self.decomposer.last_input_tokens,
-            self.decomposer.last_output_tokens,
-        )
+        if turn_mode != "synthesize_only":
+            max_subs = self.max_sub_questions
+            if turn_mode == "light":
+                max_subs = min(self.max_sub_questions, 2)
+                self.decomposer.max_sub_questions = max_subs
+                yield {
+                    "type": "thinking",
+                    "content": "Follow-up needs more research; running a lighter pass...",
+                }
+            else:
+                yield {
+                    "type": "thinking",
+                    "content": "Breaking down your research question...",
+                }
 
-        for sub_question in sub_questions:
+            sub_questions = await self.decomposer.decompose(query)
+            yield {
+                "type": "decompose",
+                "content": f"Identified {len(sub_questions)} sub-questions",
+                "data": {"sub_questions": sub_questions},
+            }
+            self.constraint_tracker.estimate_and_add_cost(
+                self.research_model,
+                self.decomposer.last_input_tokens,
+                self.decomposer.last_output_tokens,
+            )
+
+            for sub_question in sub_questions:
+                yield {
+                    "type": "thinking",
+                    "content": f"Researching (tool use): {sub_question}",
+                }
+
+                if self.skip_web_search and not (
+                    self.external_memory and self.external_memory.is_configured()
+                ):
+                    yield {
+                        "type": "thinking",
+                        "content": (
+                            "Memory-only route: no external memory webhook; "
+                            "agent can only use query_session_memory."
+                        ),
+                    }
+
+                async for ev in run_subquestion_tool_loop(
+                    openai_client=self.openai_client,
+                    constraint_tracker=self.constraint_tracker,
+                    memory_manager=self.memory_manager,
+                    search_tool=self.search_tool,
+                    external_memory=self.external_memory,
+                    sub_question=sub_question,
+                    skip_web_search=self.skip_web_search,
+                    max_rounds=self.max_tool_rounds,
+                    research_model=self.research_model,
+                    search_max_results=self.search_max_results,
+                ):
+                    yield ev
+
+                yield {"type": "token_update", "data": self.constraint_tracker.to_dict()}
+                if self.constraint_tracker.is_over_cost_limit():
+                    yield {
+                        "type": "thinking",
+                        "content": "Cost limit reached. Synthesizing from available context.",
+                    }
+                    break
+        else:
             yield {
                 "type": "thinking",
-                "content": f"Researching (tool use): {sub_question}",
+                "content": "Answering from prior research context...",
             }
-
-            if self.skip_web_search and not (
-                self.external_memory and self.external_memory.is_configured()
-            ):
-                yield {
-                    "type": "thinking",
-                    "content": (
-                        "Memory-only route: no external memory webhook; "
-                        "agent can only use query_session_memory."
-                    ),
-                }
-
-            async for ev in run_subquestion_tool_loop(
-                openai_client=self.openai_client,
-                constraint_tracker=self.constraint_tracker,
-                memory_manager=self.memory_manager,
-                search_tool=self.search_tool,
-                external_memory=self.external_memory,
-                sub_question=sub_question,
-                skip_web_search=self.skip_web_search,
-                max_rounds=self.max_tool_rounds,
-            ):
-                yield ev
-
-            yield {"type": "token_update", "data": self.constraint_tracker.to_dict()}
-            if self.constraint_tracker.is_over_cost_limit():
-                yield {
-                    "type": "thinking",
-                    "content": "Cost limit reached. Synthesizing from available context.",
-                }
-                break
 
         yield {"type": "thinking", "content": "Synthesizing findings..."}
 
+        history_block = "\n".join(
+            f"{m.get('role', 'user')}: {m.get('content', '')}" for m in history[-8:]
+        )
         system_prompt = (
-            "You are a research analyst. Answer the user's original query comprehensively "
-            "using ONLY the provided context.\n"
+            "You are a research analyst. Answer the user's query comprehensively "
+            "using ONLY the provided context and prior conversation when relevant.\n"
             "For every factual claim, cite the source URL in the format [Source: <url>].\n"
             "Be structured, precise, and thorough."
         )
         context_window = self.memory_manager.get_context_window()
         user_prompt = (
-            f"Original query:\n{query}\n\n"
+            f"Original / current query:\n{query}\n\n"
+            f"Prior conversation:\n{history_block or '(none)'}\n\n"
             f"Context:\n{context_window or 'No research context was collected.'}"
         )
 
@@ -114,7 +156,7 @@ class ResearchOrchestrator:
         observed_output_tokens = 0
 
         stream = await self.openai_client.chat.completions.create(
-            model="gpt-4o",
+            model=self.research_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -150,8 +192,10 @@ class ResearchOrchestrator:
             )
 
         self.constraint_tracker.estimate_and_add_cost(
-            "gpt-4o",
+            self.research_model,
             estimated_input_tokens,
             observed_output_tokens,
         )
+        self.last_answer = "".join(emitted_chunks)
+        yield {"type": "token_update", "data": self.constraint_tracker.to_dict()}
         yield {"type": "done"}

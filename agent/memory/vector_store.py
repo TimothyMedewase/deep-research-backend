@@ -321,8 +321,8 @@ class VectorStore:
         ]
         return _dedupe_hits(hits, limit=n_results)
 
-    def delete_collection(self) -> None:
-        if not self.cleanup_on_close:
+    def delete_collection(self, *, force: bool = False) -> None:
+        if not force and not self.cleanup_on_close:
             return
         try:
             self.client.delete_collection(name=self.collection_name)

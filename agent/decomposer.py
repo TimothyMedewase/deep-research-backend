@@ -1,15 +1,22 @@
 from __future__ import annotations
 
 import json
+
 from openai import AsyncOpenAI
 
 from agent.constraints import ConstraintTracker
 
 
 class QueryDecomposer:
-    def __init__(self, openai_client: AsyncOpenAI, max_sub_questions: int) -> None:
+    def __init__(
+        self,
+        openai_client: AsyncOpenAI,
+        max_sub_questions: int,
+        model: str = "gpt-4o",
+    ) -> None:
         self.openai_client = openai_client
         self.max_sub_questions = max_sub_questions
+        self.model = model
         self.last_input_tokens = 0
         self.last_output_tokens = 0
 
@@ -23,7 +30,7 @@ class QueryDecomposer:
         )
 
         response = await self.openai_client.chat.completions.create(
-            model="gpt-4o",
+            model=self.model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": query},

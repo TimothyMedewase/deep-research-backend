@@ -12,8 +12,6 @@ from agent.json_utils import make_json_safe
 from agent.memory.manager import MemoryManager
 from agent.tools.search import WebSearchTool
 
-RESEARCH_MODEL = "gpt-4o"
-
 SYSTEM_PROMPT = (
     "You are a research agent gathering evidence for one sub-question of a larger query.\n"
     "You have tools: use query_session_memory to see what is already in session context, "
@@ -132,6 +130,8 @@ async def run_subquestion_tool_loop(
     sub_question: str,
     skip_web_search: bool,
     max_rounds: int,
+    research_model: str = "gpt-4o",
+    search_max_results: int = 3,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """LLM-driven research via OpenAI tool calls; ingests web/external hits into MemoryManager."""
     external_ok = bool(
@@ -166,7 +166,7 @@ async def run_subquestion_tool_loop(
             break
 
         response = await openai_client.chat.completions.create(
-            model=RESEARCH_MODEL,
+            model=research_model,
             messages=messages,
             tools=tools,
             tool_choice="auto",
@@ -184,7 +184,7 @@ async def run_subquestion_tool_loop(
                 (msg.content or "") + _json_dumps(_json_safe_tool_calls(msg.tool_calls))
             ),
         )
-        constraint_tracker.estimate_and_add_cost(RESEARCH_MODEL, in_tok, out_tok)
+        constraint_tracker.estimate_and_add_cost(research_model, in_tok, out_tok)
 
         if not msg.tool_calls:
             if msg.content:
@@ -251,7 +251,7 @@ async def run_subquestion_tool_loop(
 
             elif name == "search_web" and not skip_web_search:
                 q = str(args.get("query", "")).strip() or sub_question
-                results = await search_tool.search(q)
+                results = await search_tool.search(q, max_results=search_max_results)
                 yield {
                     "type": "search",
                     "content": f"search_web: {q}",

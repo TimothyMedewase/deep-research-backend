@@ -14,8 +14,13 @@ SYSTEM_PROMPT = (
 
 
 class Summarizer:
-    def __init__(self, openai_client: AsyncOpenAI) -> None:
+    def __init__(
+        self,
+        openai_client: AsyncOpenAI,
+        model: str = "gpt-4o-mini",
+    ) -> None:
         self.openai_client = openai_client
+        self.model = model
 
     async def compress(
         self,
@@ -23,7 +28,7 @@ class Summarizer:
         max_output_tokens: int = 400,
     ) -> tuple[str, int, int]:
         response = await self.openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=self.model,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": text},
