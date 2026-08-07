@@ -216,7 +216,13 @@ async def research(request: ResearchRequest) -> EventSourceResponse:
         vector_store: VectorStore | None = None
         answer_text = ""
         try:
-            if constraint_tracker.is_over_cost_limit() or constraint_tracker.is_over_token_limit():
+            budget_exhausted = (
+                constraint_tracker.is_over_cost_limit()
+                or constraint_tracker.is_over_token_limit()
+            )
+            # First turn with no prior context cannot proceed if already over budget.
+            # Follow-ups soft-fail into synthesize-only so prior research remains usable.
+            if budget_exhausted and not is_follow_up and not thread.messages:
                 yield {
                     "data": _event_json(
                         {
@@ -312,32 +318,65 @@ async def research(request: ResearchRequest) -> EventSourceResponse:
                             }
                         )
                     }
-                decision = await classify_followup(
-                    openai_client=app.state.openai_client,
-                    model=config.compression_model,
-                    query=request.query,
-                    chat_history=thread.messages,
-                    memory_hits=memory_hits,
-                    last_answer=thread.last_answer,
-                    constraint_tracker=constraint_tracker,
-                )
-                turn_mode = (
-                    "synthesize_only"
-                    if decision == "answer_from_context"
-                    else "light"
-                )
-                yield {
-                    "data": _event_json(
-                        {
-                            "type": "route",
-                            "content": f"Follow-up: {decision}",
-                            "data": {
-                                "route": f"follow_up:{decision}",
-                                "turn_mode": turn_mode,
-                            },
-                        }
+
+                if budget_exhausted:
+                    turn_mode = "synthesize_only"
+                    yield {
+                        "data": _event_json(
+                            {
+                                "type": "route",
+                                "content": (
+                                    "Follow-up: budget exhausted; answering from "
+                                    "existing context only"
+                                ),
+                                "data": {
+                                    "route": "follow_up:budget_limited",
+                                    "turn_mode": turn_mode,
+                                    "token_state": constraint_tracker.to_dict(),
+                                },
+                            }
+                        )
+                    }
+                    yield {
+                        "data": _event_json(
+                            {
+                                "type": "thinking",
+                                "content": (
+                                    "Thread budget reached after prior research. "
+                                    "Answering from saved context (no new tool calls). "
+                                    "Raise max cost/tokens or start a new research for "
+                                    "fresh web search."
+                                ),
+                            }
+                        )
+                    }
+                else:
+                    decision = await classify_followup(
+                        openai_client=app.state.openai_client,
+                        model=config.compression_model,
+                        query=request.query,
+                        chat_history=thread.messages,
+                        memory_hits=memory_hits,
+                        last_answer=thread.last_answer,
+                        constraint_tracker=constraint_tracker,
                     )
-                }
+                    turn_mode = (
+                        "synthesize_only"
+                        if decision == "answer_from_context"
+                        else "light"
+                    )
+                    yield {
+                        "data": _event_json(
+                            {
+                                "type": "route",
+                                "content": f"Follow-up: {decision}",
+                                "data": {
+                                    "route": f"follow_up:{decision}",
+                                    "turn_mode": turn_mode,
+                                },
+                            }
+                        )
+                    }
             else:
                 yield {
                     "data": _event_json(
